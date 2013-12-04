@@ -1,4 +1,6 @@
 #!/usr/bin/env python
+#
+# Adapted from fusepy's loopback example
 
 from __future__ import with_statement
 
@@ -9,6 +11,7 @@ from threading import Lock
 
 import os
 
+# https://github.com/terencehonles/fusepy
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
 
