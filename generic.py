@@ -161,6 +161,15 @@ class StaticList(LoggingMixIn, Operations):
             return os.write(fh, data)
 
 
+def read_file(filename):
+    '''Yields lines from a file, ignoring lines starting with ; or #
+    and removing quote marks.'''
+    with open(filename, 'r') as f:
+        for line in f:
+            line = line.strip(' \"\t\n')
+            if not line.startswith('#') and not line.startswith(';'):
+                yield line
+
 
 if __name__ == '__main__':
 
@@ -176,6 +185,7 @@ if __name__ == '__main__':
 
     optparser = OptionParser(description = description,
                              usage = usage)
+    optparser.add_option('-i', '--input', metavar='FILE', help='get list from FILE instead of command arguments')
     optparser.add_option('-v', '--verbose', action='store_true')
     optparser.add_option('', '--debug', action='store_true')
     (options, args) = optparser.parse_args()
@@ -185,11 +195,23 @@ if __name__ == '__main__':
     if options.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if len(args) < 2:
+    if len(args) < 1:
         sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
         sys.stderr.write('\n')
         exit(1)
 
-    logging.debug('Mounting to ' + argv[1])
     mountpoint = args.pop(0)
-    fuse = FUSE(StaticList(zip(args, args)), mountpoint, foreground=True)
+
+    if options.input:
+        files = list(read_file(options.input))
+    else:
+        files = args
+
+    if not files:
+        sys.stderr.write('No files to mount.\n\n')
+        sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
+        sys.stderr.write('\n')
+        exit(1)
+        
+    logging.debug('Mounting to ' + mountpoint)
+    fuse = FUSE(StaticList(zip(files, files)), mountpoint, foreground=True)
