@@ -45,10 +45,9 @@ class StaticList(LoggingMixIn, Operations):
         dirs = defaultdict(Directory)
         for e in entries:
             d, base = split(e)
-            while d and not (d in entries or (d in dirs and base in dirs[d])):
+            while d and base and not (d in entries or (d in dirs and base in dirs[d])):
                 dirs[d].add(base)
                 d, base = split(d)
-            dirs[d].add(base)
         logging.debug('dir tree: ' + str(dirs))
         return dirs
 
