@@ -170,6 +170,9 @@ def read_file(filename):
             if not line.startswith('#') and not line.startswith(';'):
                 yield line
 
+def doubler(generator):
+    for x in generator:
+        yield x, x
 
 if __name__ == '__main__':
 
@@ -203,15 +206,15 @@ if __name__ == '__main__':
     mountpoint = args.pop(0)
 
     if options.input:
-        files = list(read_file(options.input))
+        pairs = doubler(read_file(options.input))
     else:
-        files = args
+        pairs = zip(args, args)
 
-    if not files:
+    if not pairs:
         sys.stderr.write('No files to mount.\n\n')
         sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
         sys.stderr.write('\n')
         exit(1)
         
     logging.debug('Mounting to ' + mountpoint)
-    fuse = FUSE(StaticList(zip(files, files)), mountpoint, foreground=True)
+    fuse = FUSE(StaticList(pairs), mountpoint, foreground=True)
