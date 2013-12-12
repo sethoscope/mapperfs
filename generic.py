@@ -179,6 +179,56 @@ def read_file(filename):
             if not line.startswith('#') and not line.startswith(';'):
                 yield line
 
+def flatten(generator):
+    for f in generator:
+        f = f.rstrip('/')
+        path, base = split(f)
+        yield '/' + base
+
+class Uncollider:
+    '''When you dump files from many places into one directory
+    (e.g. if you flatten the directory structure), you may have
+    multiple files with the same name.  This is used to rename the
+    collisions.
+    '''
+
+    fmt_ext = '{base}-{n}.{ext}'
+    fmt_noext =  '{base}-{n}'
+
+    def uncollide(self, generator):
+        # We'll go through the files in the order received, renaming any
+        # that conflict with ones we've already yielded, but choosing
+        # the new names such that they don't preempt any actual files
+        # later in the list.  Sadly, this requires slupring up the whole
+        # list at the start, which is unlikely to be an actual problem
+        # for anyone, but it's nice when we can stick to O(1) generator
+        # chains.
+        files = list(generator)  # alas
+        reserved = set(files)
+        yielded = set()
+        for f in files:
+            if f in yielded:
+                f = self.new_name(f, reserved)
+            yield f
+            yielded.add(f)
+
+    __call__ = uncollide
+
+    def new_name(self, filename, reserved):
+        if '.' in filename:
+            base, ext = filename.split('.', 1)
+            fmt = self.fmt_ext
+        else:
+            base, ext = filename, ''
+            fmt = self.fmt_noext
+        n = 1
+        while True:
+            new_name = fmt.format(base=base, ext=ext, n=n)
+            if new_name not in reserved:
+                return new_name
+            n += 1
+
+
 def doubler(generator):
     for x in generator:
         yield x, x
@@ -199,6 +249,7 @@ if __name__ == '__main__':
                              usage = usage)
     optparser.add_option('-i', '--input', metavar='FILE', help='get list from FILE instead of command arguments')
     optparser.add_option('-v', '--verbose', action='store_true')
+    optparser.add_option('-f', '--flatten', action='store_true')
     optparser.add_option('', '--debug', action='store_true')
     (options, args) = optparser.parse_args()
 
@@ -215,15 +266,17 @@ if __name__ == '__main__':
     mountpoint = args.pop(0)
 
     if options.input:
-        pairs = doubler(read_file(options.input))
+        files = read_file(options.input)
     else:
-        pairs = zip(args, args)
+        files = args
 
-    if not pairs:
-        sys.stderr.write('No files to mount.\n\n')
-        sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
-        sys.stderr.write('\n')
-        exit(1)
-        
+    if options.flatten:
+        logging.debug('flattening!')
+        files = list(files)
+        uncollide = Uncollider()
+        pairs = zip(uncollide(flatten(files)), files)
+    else:
+        pairs = doubler(files)
+
     logging.debug('Mounting to ' + mountpoint)
     fuse = FUSE(StaticList(pairs), mountpoint, foreground=True)
