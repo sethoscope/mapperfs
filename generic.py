@@ -28,10 +28,8 @@ class StaticList(LoggingMixIn, Operations):
         '''pairs is an iterable of (realpath, mountedpath) pairs.
         For example: [('/bin/bash', '/mysteryshell'), ('/usr/bin/tcsh', '/othershell')]
         '''
-        self.entries = { mounted: real for (mounted, real) in pairs }
-        for real in self.entries.values():
-            if isdir(real):
-                raise NotImplementedError('no directory support yet: ' + real)
+        self.entries = { mounted.rstrip('/'): real.rstrip('/') for (mounted, real) in pairs }
+        logging.debug('init with: ' + str(self.entries))
         self.dirs = self.synthesize_dirs(self.entries)
         self.rwlock = Lock()
         self.ctime = time.time()
@@ -52,20 +50,31 @@ class StaticList(LoggingMixIn, Operations):
         return dirs
 
     def _find_referent(self, path):
+        # TODO: memoize
         logging.debug('lookup: ' + path)
         if path in self.entries:
-            logging.debug('resolved %s to %s' % (path, self.entries[path]))
+            logging.debug('  resolved %s to %s' % (path, self.entries[path]))
             return self.entries[path]
-        elif path in self.dirs:
-            logging.debug('resolved %s to a directory' % path)
+        if path in self.dirs:
+            logging.debug('  resolved %s to a directory' % path)
             return self.dirs[path]
-        else:
-            logging.debug('raising ENOENT')
-            raise FuseOSError(ENOENT)
+        # Perhaps it's under a directory we've exposed
+        logging.debug('  could it be under a mounted directory?')
+        left, base = split(path)
+        right = base
+        while base and not (left in self.entries or left in self.dirs):
+            left, base = split(left)
+            right = os.path.join(base, right)
+        if left:
+            logging.debug('  found %s' % left)
+            if left in self.entries and isdir(self.entries[left]):
+                logging.debug('  which might contain ' + right)
+                return os.path.join(self.entries[left], right)
+        raise FuseOSError(ENOENT)
 
     def __call__(self, op, path, *args):
         real_path = self._find_referent(path)
-        logging.debug(' calling %s with %s %s' % (op, path, str(args)))
+        logging.debug('calling %s with %s %s' % (op, path, str(args)))
         return Operations.__call__(self, op, real_path, *args)
 
 
