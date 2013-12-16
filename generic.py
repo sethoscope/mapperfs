@@ -5,7 +5,7 @@
 from __future__ import with_statement
 
 from errno import EACCES, ENOENT
-from os.path import realpath, split, isdir
+import os.path
 from sys import argv, exit
 from threading import Lock
 from collections import defaultdict
@@ -42,10 +42,10 @@ class StaticList(LoggingMixIn, Operations):
         { path : set(contents), ... }'''
         dirs = defaultdict(Directory)
         for e in entries:
-            d, base = split(e)
+            d, base = os.path.split(e)
             while d and base and not (d in entries or (d in dirs and base in dirs[d])):
                 dirs[d].add(base)
-                d, base = split(d)
+                d, base = os.path.split(d)
         logging.debug('dir tree: ' + str(dirs))
         return dirs
 
@@ -60,14 +60,14 @@ class StaticList(LoggingMixIn, Operations):
             return self.dirs[path]
         # Perhaps it's under a directory we've exposed
         logging.debug('  could it be under a mounted directory?')
-        left, base = split(path)
+        left, base = os.path.split(path)
         right = base
         while base and not (left in self.entries or left in self.dirs):
-            left, base = split(left)
+            left, base = os.path.split(left)
             right = os.path.join(base, right)
         if left:
             logging.debug('  found %s' % left)
-            if left in self.entries and isdir(self.entries[left]):
+            if left in self.entries and os.path.isdir(self.entries[left]):
                 logging.debug('  which might contain ' + right)
                 return os.path.join(self.entries[left], right)
         raise FuseOSError(ENOENT)
@@ -182,8 +182,29 @@ def read_file(filename):
 def flatten(generator):
     for f in generator:
         f = f.rstrip('/')
-        path, base = split(f)
+        path, base = os.path.split(f)
         yield '/' + base
+
+
+def longest_common_path(file_list):
+    '''Return the longest path that refers to a directory under
+    which all the filenames can be found.  This is similar to
+    os.path.commonprefix(), but the result is guaranteed to be a
+    directory, at least as implied by the filenames.
+    '''
+    prefix = os.path.commonprefix(file_list)
+    i = prefix.rfind('/')
+    if i == -1:  # not found!
+        return ''
+    return prefix[:i]
+
+        
+def listify(iterable):
+    '''Turn iterable into a list, making a copy only if necessary.'''
+    if isinstance(iterable, list):
+        return iterable
+    return list(iterable)
+
 
 class Uncollider:
     '''When you dump files from many places into one directory
@@ -192,8 +213,7 @@ class Uncollider:
     collisions.
     '''
 
-    fmt_ext = '{base}-{n}.{ext}'
-    fmt_noext =  '{base}-{n}'
+    fmt = '{base}-{n}{ext}'
 
     def uncollide(self, generator):
         # We'll go through the files in the order received, renaming any
@@ -203,7 +223,7 @@ class Uncollider:
         # list at the start, which is unlikely to be an actual problem
         # for anyone, but it's nice when we can stick to O(1) generator
         # chains.
-        files = list(generator)  # alas
+        files = listify(generator)  # alas
         reserved = set(files)
         yielded = set()
         for f in files:
@@ -216,15 +236,10 @@ class Uncollider:
     __call__ = uncollide
 
     def new_name(self, filename, reserved):
-        if '.' in filename:
-            base, ext = filename.split('.', 1)
-            fmt = self.fmt_ext
-        else:
-            base, ext = filename, ''
-            fmt = self.fmt_noext
+        base, ext = os.path.splitext(filename)
         n = 1
         while True:
-            new_name = fmt.format(base=base, ext=ext, n=n)
+            new_name = self.fmt.format(base=base, ext=ext, n=n)
             if new_name not in reserved:
                 return new_name
             n += 1
@@ -250,7 +265,11 @@ if __name__ == '__main__':
                              usage = usage)
     optparser.add_option('-i', '--input', metavar='FILE', help='get list from FILE instead of command arguments')
     optparser.add_option('-v', '--verbose', action='store_true')
-    optparser.add_option('-f', '--flatten', action='store_true')
+    
+    schemes = [ 'copy', 'flatten', 'common']
+    optparser.add_option('-s', '--scheme', type='choice',
+                         choices=schemes, default=schemes[0],
+                         help='choices: ' + ', '.join(schemes) + '; default: %default')
     optparser.add_option('', '--debug', action='store_true')
     (options, args) = optparser.parse_args()
 
@@ -271,13 +290,21 @@ if __name__ == '__main__':
     else:
         files = args
 
-    if options.flatten:
+    if options.scheme == 'copy':
+        logging.debug('copying file hierarchy')
+        pairs = doubler(files)
+    elif options.scheme == 'flatten':
         logging.debug('flattening!')
-        files = list(files)
+        files = listify(files)
         uncollide = Uncollider()
         pairs = zip(uncollide(flatten(files)), files)
-    else:
-        pairs = doubler(files)
+    elif options.scheme == 'common':
+        files = listify(files)
+        prefix = longest_common_path(files)
+        logging.debug('longest common prefix: ' + prefix)
+        prefix_len = len(prefix)
+        trimmed = (f[prefix_len:] for f in files)
+        pairs = zip(trimmed, files)
 
     logging.debug('Mounting to ' + mountpoint)
     fuse = FUSE(StaticList(pairs), mountpoint, foreground=True)
