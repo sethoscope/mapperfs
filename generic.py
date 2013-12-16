@@ -211,6 +211,7 @@ class Uncollider:
                 f = self.new_name(f, reserved)
             yield f
             yielded.add(f)
+            reserved.add(f)
 
     __call__ = uncollide
 
