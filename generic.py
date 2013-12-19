@@ -82,8 +82,9 @@ class StaticList(LoggingMixIn, Operations):
         raise FuseOSError(EACCES)
 
     def access(self, path, mode):
-        if not os.access(path, mode):
-            raise FuseOSError(EACCES)
+        if isinstance(path, Directory):
+            return 1 if (mode & os.W_OK) else 0
+        return os.access(path, mode)
 
     chmod = os.chmod
     chown = os.chown
