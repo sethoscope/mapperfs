@@ -11,33 +11,32 @@ from threading import Lock
 from collections import defaultdict
 import stat
 import logging
+import fileinput
 import os
 import time
 
 # https://github.com/terencehonles/fusepy
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
-
 class Directory(set):
     def num_subdirs(self):
         return sum(1 for e in self if isinstance(e, Directory))
 
-
-class StaticList(LoggingMixIn, Operations):
-    def __init__(self, pairs):
-        '''pairs is an iterable of (realpath, mountedpath) pairs.
-        For example: [('/bin/bash', '/mysteryshell'), ('/usr/bin/tcsh', '/othershell')]
-        '''
-        self.entries = { mounted.rstrip('/'): real.rstrip('/') for (mounted, real) in pairs }
-        logging.debug('init with: ' + str(self.entries))
-        self.dirs = self.synthesize_dirs(self.entries)
+class MapFuse(LoggingMixIn, Operations):
+    def __init__(self, reader):
         self.rwlock = Lock()
-        self.ctime = time.time()
         self.uid = os.geteuid()
         self.gid = os.getegid()
+        self.read_list()
+
+    def read_list(self):
+        self.entries = { mounted.rstrip('/'): real.rstrip('/') for (real, mounted) in reader.pairs() }
+        logging.debug('init with: ' + str(self.entries))
+        self.dirs = self._synthesize_dirs(self.entries)
+        self.ctime = time.time()
 
     @staticmethod
-    def synthesize_dirs(entries):
+    def _synthesize_dirs(entries):
         '''Return the directories needed to reach the entries in the form
         { path : set(contents), ... }'''
         dirs = defaultdict(Directory)
@@ -76,7 +75,6 @@ class StaticList(LoggingMixIn, Operations):
         real_path = self._find_referent(path)
         logging.debug('calling %s with %s %s' % (op, path, str(args)))
         return Operations.__call__(self, op, real_path, *args)
-
 
     def noaccess(self, *args):
         raise FuseOSError(EACCES)
@@ -171,52 +169,45 @@ class StaticList(LoggingMixIn, Operations):
             return os.write(fh, data)
 
 
-def read_file(filename):
-    '''Yields lines from a file, ignoring lines starting with ; or #
-    and removing quote marks.'''
-    with open(filename, 'r') as f:
-        for line in f:
+class FileReader:
+    def __init__(self, input_files):
+        self.input_files = input_files
+    
+    def pairs(self):
+        '''Yield (realpath, mountedpath) pairs for files/dirs to expose.
+        For example: [('/bin/bash', '/mysteryshell'),
+                      ('/usr/bin/tcsh', '/othershell')]
+        '''
+        for line in self.read_file(self.input_files):
+            yield line, line
+        
+    @staticmethod
+    def read_file(input_files):
+        '''Yields lines from a file, ignoring lines starting with ; or #
+        and removing quote marks.'''
+        for line in fileinput.input(input_files):
             line = line.strip(' \"\t\n')
             if not line.startswith('#') and not line.startswith(';'):
                 yield line
 
-def flatten(generator):
-    for f in generator:
-        f = f.rstrip('/')
-        path, base = os.path.split(f)
-        yield '/' + base
 
-
-def longest_common_path(file_list):
-    '''Return the longest path that refers to a directory under
-    which all the filenames can be found.  This is similar to
-    os.path.commonprefix(), but the result is guaranteed to be a
-    directory, at least as implied by the filenames.
-    '''
-    prefix = os.path.commonprefix(file_list)
-    i = prefix.rfind('/')
-    if i == -1:  # not found!
-        return ''
-    return prefix[:i]
-
-        
-def listify(iterable):
-    '''Turn iterable into a list, making a copy only if necessary.'''
-    if isinstance(iterable, list):
-        return iterable
-    return list(iterable)
-
-
-class Uncollider:
-    '''When you dump files from many places into one directory
-    (e.g. if you flatten the directory structure), you may have
-    multiple files with the same name.  This is used to rename the
-    collisions.
-    '''
+class FlatReader(FileReader):
 
     fmt = '{base}-{n}{ext}'
 
-    def uncollide(self, generator):
+    def pairs(self):
+        files = list(self.read_file(self.input_files))
+        flat = self._flat_with_collisions(files)
+        flat = self._uncollide(flat)
+        return zip(files, flat)
+    
+    @staticmethod
+    def _flat_with_collisions(files):
+        return ['/' + os.path.basename(f.rstrip('/')) for f in files]
+
+    def _uncollide(self, files):
+        '''Yields files from input list, such that duplicate filenames
+        are renamed according to self.fmt.'''
         # We'll go through the files in the order received, renaming any
         # that conflict with ones we've already yielded, but choosing
         # the new names such that they don't preempt any actual files
@@ -224,19 +215,16 @@ class Uncollider:
         # list at the start, which is unlikely to be an actual problem
         # for anyone, but it's nice when we can stick to O(1) generator
         # chains.
-        files = listify(generator)  # alas
         reserved = set(files)
         yielded = set()
         for f in files:
             if f in yielded:
-                f = self.new_name(f, reserved)
+                f = self._new_name(f, reserved)
             yield f
             yielded.add(f)
             reserved.add(f)
 
-    __call__ = uncollide
-
-    def new_name(self, filename, reserved):
+    def _new_name(self, filename, reserved):
         base, ext = os.path.splitext(filename)
         n = 1
         while True:
@@ -246,9 +234,29 @@ class Uncollider:
             n += 1
 
 
-def doubler(generator):
-    for x in generator:
-        yield x, x
+class TrimReader(FileReader):
+    def pairs(self):
+        files = list(self.read_file(self.input_files))
+        prefix = self._longest_common_path(files)
+        logging.debug('longest common prefix: ' + prefix)
+        prefix_len = len(prefix)
+        trimmed = (f[prefix_len:] for f in files)
+        return zip(files, trimmed)
+
+    @staticmethod
+    def _longest_common_path(file_list):
+        '''Return the longest path that refers to a directory under
+        which all the filenames can be found.  This is similar to
+        os.path.commonprefix(), but the result is guaranteed to be a
+        directory, at least as implied by the filenames.
+        '''
+        prefix = os.path.commonprefix(file_list)
+        i = prefix.rfind('/')
+        if i == -1:  # not found!
+            return ''
+        return prefix[:i]
+
+
 
 if __name__ == '__main__':
 
@@ -259,15 +267,14 @@ if __name__ == '__main__':
 
     from optparse import OptionParser
 
-    usage = '%prog <mountpoint> entries ...'
-    description = 'mount a given list of files and directories'
+    usage = '%prog <mountpoint> inputfile ...]'
+    description = 'expose some existing files in a filesystem at mountpoint'
 
     optparser = OptionParser(description = description,
                              usage = usage)
-    optparser.add_option('-i', '--input', metavar='FILE', help='get list from FILE instead of command arguments')
     optparser.add_option('-v', '--verbose', action='store_true')
     
-    schemes = [ 'copy', 'flatten', 'common']
+    schemes = [ 'copy', 'flat', 'trim']
     optparser.add_option('-s', '--scheme', type='choice',
                          choices=schemes, default=schemes[0],
                          help='choices: ' + ', '.join(schemes) + '; default: %default')
@@ -279,33 +286,16 @@ if __name__ == '__main__':
     if options.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if len(args) < 1:
+    if len(args) < 2:
         sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
         sys.stderr.write('\n')
         exit(1)
 
     mountpoint = args.pop(0)
-
-    if options.input:
-        files = read_file(options.input)
-    else:
-        files = args
-
-    if options.scheme == 'copy':
-        logging.debug('copying file hierarchy')
-        pairs = doubler(files)
-    elif options.scheme == 'flatten':
-        logging.debug('flattening!')
-        files = listify(files)
-        uncollide = Uncollider()
-        pairs = zip(uncollide(flatten(files)), files)
-    elif options.scheme == 'common':
-        files = listify(files)
-        prefix = longest_common_path(files)
-        logging.debug('longest common prefix: ' + prefix)
-        prefix_len = len(prefix)
-        trimmed = (f[prefix_len:] for f in files)
-        pairs = zip(trimmed, files)
-
     logging.debug('Mounting to ' + mountpoint)
-    fuse = FUSE(StaticList(pairs), mountpoint, foreground=True)
+
+    reader = {'copy': FileReader,
+              'flat': FlatReader,
+              'trim': TrimReader }[options.scheme](args)
+
+    fuse = FUSE(MapFuse(reader), mountpoint, foreground=True)
