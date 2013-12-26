@@ -219,20 +219,6 @@ class MapFuse(LoggingMixIn, Operations):
             return os.write(fh, data)
 
 
-class FileReader:
-    def __init__(self, input_files):
-        self.input_files = input_files
-    
-    def read_files(self):
-        '''Yields lines from input files, ignoring lines starting
-        with ; or # and removing surrounding quote marks.
-        '''
-        for line in fileinput.input(self.input_files):
-            line = line.strip(' \"\t\n')
-            if not line.startswith('#') and not line.startswith(';'):
-                yield line
-
-
 def listify(iterable):
     '''Return a list version of iterable.'''
     if isinstance(iterable, list):
@@ -309,8 +295,16 @@ class CommonMapper:
         return prefix[:i]
 
 
-if __name__ == '__main__':
+def read_files(input_files):
+    '''Yields lines from input files, ignoring lines starting
+    with ; or # and removing surrounding quote marks.
+    '''
+    for line in fileinput.input(input_files):
+        line = line.strip(' \"\t\n')
+        if not line.startswith('#') and not line.startswith(';'):
+            yield line
 
+def main():
     # I don't expect this command line application to be very useful.
     # It's more of a proof of concept and rough test.  The real value
     # will come from using this module in other code, where the files
@@ -360,9 +354,12 @@ if __name__ == '__main__':
     mountpoint = args.pop(0)
     logging.debug('Mounting to ' + mountpoint)
 
-    reader = FileReader(args)
     mapper = schemes[options.scheme]()
-    pair_source = lambda: mapper.pairs(reader.read_files())
+    pair_source = lambda: mapper.pairs(read_files(args))
 
     watch = [] if options.once else [i for i in args if i != '-']
     fuse = FUSE(MapFuse(pair_source, watch), mountpoint, foreground=True)
+    
+if __name__ == '__main__':
+    main()
+
