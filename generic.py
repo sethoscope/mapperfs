@@ -7,6 +7,7 @@ from __future__ import with_statement
 from errno import EACCES, ENOENT
 from threading import Thread, Lock
 from collections import defaultdict
+from itertools import izip
 import stat
 import logging
 import fileinput
@@ -44,8 +45,10 @@ class WatcherThread(Thread):
             logging.debug('watcher got change event')
             self.mapfuse.read_list()
 
+
 class MapFuse(LoggingMixIn, Operations):
-    def __init__(self, reader, watch_files):
+    def __init__(self, pair_source, watch_files):
+        self.pair_source = pair_source
         self.rwlock = Lock()
         self.update_lock = Lock()
         self.uid = os.geteuid()
@@ -54,7 +57,8 @@ class MapFuse(LoggingMixIn, Operations):
         self.read_list()
 
     def read_list(self):
-        entries = { mounted.rstrip('/'): real.rstrip('/') for (real, mounted) in reader.pairs() }
+        entries = { mounted.rstrip('/'): real.rstrip('/')
+                    for (real, mounted) in self.pair_source() }
         dirs = self._synthesize_dirs(entries)
         logging.debug('init with: ' + str(entries))
         with self.update_lock:
@@ -205,34 +209,35 @@ class FileReader:
     def __init__(self, input_files):
         self.input_files = input_files
     
-    def pairs(self):
-        '''Yield (realpath, mountedpath) pairs for files/dirs to expose.
-        For example: [('/bin/bash', '/mysteryshell'),
-                      ('/usr/bin/tcsh', '/othershell')]
-        '''
-        for line in self.read_files(self.input_files):
-            yield line, line
-        
-    @staticmethod
-    def read_files(input_files):
+    def read_files(self):
         '''Yields lines from input files, ignoring lines starting
         with ; or # and removing surrounding quote marks.
         '''
-        for line in fileinput.input(input_files):
+        for line in fileinput.input(self.input_files):
             line = line.strip(' \"\t\n')
             if not line.startswith('#') and not line.startswith(';'):
                 yield line
 
 
-class FlatReader(FileReader):
+def listify(iterable):
+    '''Return a list version of iterable.'''
+    if isinstance(iterable, list):
+        return iterable
+    return list(iterable)
 
+class TrivialMapper:
+    def pairs(self, files):
+        for f in files:
+            yield f, f
+
+class FlatMapper:
     fmt = '{base}-{n}{ext}'
 
-    def pairs(self):
-        files = list(self.read_files(self.input_files))
+    def pairs(self, files):
+        files = listify(files)
         flat = self._flat_with_collisions(files)
         flat = self._uncollide(flat)
-        return zip(files, flat)
+        return izip(files, flat)
     
     @staticmethod
     def _flat_with_collisions(files):
@@ -267,14 +272,14 @@ class FlatReader(FileReader):
             n += 1
 
 
-class CommonReader(FileReader):
-    def pairs(self):
-        files = list(self.read_files(self.input_files))
+class CommonMapper:
+    def pairs(self, files):
+        files = listify(files)
         prefix = self._longest_common_path(files)
         logging.debug('longest common prefix: ' + prefix)
         prefix_len = len(prefix)
         trimmed = (f[prefix_len:] for f in files)
-        return zip(files, trimmed)
+        return izip(files, trimmed)
 
     @staticmethod
     def _longest_common_path(file_list):
@@ -288,7 +293,6 @@ class CommonReader(FileReader):
         if i == -1:  # not found!
             return ''
         return prefix[:i]
-
 
 
 if __name__ == '__main__':
@@ -315,9 +319,9 @@ if __name__ == '__main__':
                              usage = usage)
     optparser.add_option('-v', '--verbose', action='store_true')
     
-    schemes = {'copy': FileReader,
-               'flat': FlatReader,
-               'common': CommonReader }
+    schemes = {'copy': TrivialMapper,
+               'flat': FlatMapper,
+               'common': CommonMapper }
     optparser.add_option('-s', '--scheme', type='choice',
                          choices=schemes.keys(), default='copy',
                          help='choices: '
@@ -342,7 +346,9 @@ if __name__ == '__main__':
     mountpoint = args.pop(0)
     logging.debug('Mounting to ' + mountpoint)
 
-    reader = schemes[options.scheme](args)
+    reader = FileReader(args)
+    mapper = schemes[options.scheme]()
+    pair_source = lambda: mapper.pairs(reader.read_files())
 
     watch = [] if options.once else [i for i in args if i != '-']
-    fuse = FUSE(MapFuse(reader, watch), mountpoint, foreground=True)
+    fuse = FUSE(MapFuse(pair_source, watch), mountpoint, foreground=True)
