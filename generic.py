@@ -5,9 +5,7 @@
 from __future__ import with_statement
 
 from errno import EACCES, ENOENT
-import os.path
-from sys import argv, exit
-from threading import Lock
+from threading import Thread, Lock
 from collections import defaultdict
 import stat
 import logging
@@ -18,21 +16,50 @@ import time
 # https://github.com/terencehonles/fusepy
 from fuse import FUSE, FuseOSError, Operations, LoggingMixIn
 
+try:
+    import inotifyx
+except ImportError:
+    logging.warning('inotifyx module not found; file watching not supported')
+
 class Directory(set):
     def num_subdirs(self):
         return sum(1 for e in self if isinstance(e, Directory))
 
+class WatcherThread(Thread):
+    def __init__(self, mapfuse, watch_files):
+        super(WatcherThread, self).__init__()
+        self.watch_files = watch_files
+        self.mapfuse = mapfuse
+        
+    def run(self):
+        logging.debug('starting watcher thread')
+        mask = inotifyx.IN_MODIFY | inotifyx.IN_CLOSE_WRITE
+        in_fd = inotifyx.init()
+        for f in self.watch_files:
+            inotifyx.add_watch(in_fd, f, mask)
+            logging.debug('watching ' + f)
+        while True:
+            logging.debug('watcher waiting for events')
+            inotifyx.get_events(in_fd)
+            logging.debug('watcher got change event')
+            self.mapfuse.read_list()
+
 class MapFuse(LoggingMixIn, Operations):
-    def __init__(self, reader):
+    def __init__(self, reader, watch_files):
         self.rwlock = Lock()
+        self.update_lock = Lock()
         self.uid = os.geteuid()
         self.gid = os.getegid()
+        self.watch_files = watch_files
         self.read_list()
 
     def read_list(self):
-        self.entries = { mounted.rstrip('/'): real.rstrip('/') for (real, mounted) in reader.pairs() }
-        logging.debug('init with: ' + str(self.entries))
-        self.dirs = self._synthesize_dirs(self.entries)
+        entries = { mounted.rstrip('/'): real.rstrip('/') for (real, mounted) in reader.pairs() }
+        dirs = self._synthesize_dirs(entries)
+        logging.debug('init with: ' + str(entries))
+        with self.update_lock:
+            self.entries = entries
+            self.dirs = dirs
         self.ctime = time.time()
 
     @staticmethod
@@ -49,27 +76,27 @@ class MapFuse(LoggingMixIn, Operations):
         return dirs
 
     def _find_referent(self, path):
-        # TODO: memoize
         logging.debug('lookup: ' + path)
-        if path in self.entries:
-            logging.debug('  resolved %s to %s' % (path, self.entries[path]))
-            return self.entries[path]
-        if path in self.dirs:
-            logging.debug('  resolved %s to a directory' % path)
-            return self.dirs[path]
-        # Perhaps it's under a directory we've exposed
-        logging.debug('  could it be under a mounted directory?')
-        left, base = os.path.split(path)
-        right = base
-        while base and not (left in self.entries or left in self.dirs):
-            left, base = os.path.split(left)
-            right = os.path.join(base, right)
-        if left:
-            logging.debug('  found %s' % left)
-            if left in self.entries and os.path.isdir(self.entries[left]):
-                logging.debug('  which might contain ' + right)
-                return os.path.join(self.entries[left], right)
-        raise FuseOSError(ENOENT)
+        with self.update_lock:
+            if path in self.entries:
+                logging.debug('  resolved %s to %s' % (path, self.entries[path]))
+                return self.entries[path]
+            if path in self.dirs:
+                logging.debug('  resolved %s to a directory' % path)
+                return self.dirs[path]
+            # Perhaps it's under a directory we've exposed
+            logging.debug('  could it be under a mounted directory?')
+            left, base = os.path.split(path)
+            right = base
+            while base and not (left in self.entries or left in self.dirs):
+                left, base = os.path.split(left)
+                right = os.path.join(base, right)
+            if left:
+                logging.debug('  found %s' % left)
+                if left in self.entries and os.path.isdir(self.entries[left]):
+                    logging.debug('  which might contain ' + right)
+                    return os.path.join(self.entries[left], right)
+            raise FuseOSError(ENOENT)
 
     def __call__(self, op, path, *args):
         real_path = self._find_referent(path)
@@ -83,6 +110,11 @@ class MapFuse(LoggingMixIn, Operations):
         if isinstance(path, Directory):
             return 1 if (mode & os.W_OK) else 0
         return os.access(path, mode)
+
+    def init(self, path):
+        if self.watch_files:
+            watch_thread = WatcherThread(self, self.watch_files)
+            watch_thread.start()
 
     chmod = os.chmod
     chown = os.chown
@@ -178,13 +210,14 @@ class FileReader:
         For example: [('/bin/bash', '/mysteryshell'),
                       ('/usr/bin/tcsh', '/othershell')]
         '''
-        for line in self.read_file(self.input_files):
+        for line in self.read_files(self.input_files):
             yield line, line
         
     @staticmethod
-    def read_file(input_files):
-        '''Yields lines from a file, ignoring lines starting with ; or #
-        and removing quote marks.'''
+    def read_files(input_files):
+        '''Yields lines from input files, ignoring lines starting
+        with ; or # and removing surrounding quote marks.
+        '''
         for line in fileinput.input(input_files):
             line = line.strip(' \"\t\n')
             if not line.startswith('#') and not line.startswith(';'):
@@ -196,7 +229,7 @@ class FlatReader(FileReader):
     fmt = '{base}-{n}{ext}'
 
     def pairs(self):
-        files = list(self.read_file(self.input_files))
+        files = list(self.read_files(self.input_files))
         flat = self._flat_with_collisions(files)
         flat = self._uncollide(flat)
         return zip(files, flat)
@@ -234,9 +267,9 @@ class FlatReader(FileReader):
             n += 1
 
 
-class TrimReader(FileReader):
+class CommonReader(FileReader):
     def pairs(self):
-        files = list(self.read_file(self.input_files))
+        files = list(self.read_files(self.input_files))
         prefix = self._longest_common_path(files)
         logging.debug('longest common prefix: ' + prefix)
         prefix_len = len(prefix)
@@ -265,19 +298,34 @@ if __name__ == '__main__':
     # will come from using this module in other code, where the files
     # and their visible mount points are based on something interesting.
 
+    # Note that you can specify both stdin and other input files, but
+    # if you do, you probably want to use --once.  Otherwise when a
+    # file changes, we'll throw away whatever we read from stdin the
+    # first time.  We could avoid this by keeping track of which files
+    # we got from each input source and only rereading the input file
+    # that changed.  But we don't do that, because it's complicated
+    # and probably not useful to anyone.
+
     from optparse import OptionParser
 
-    usage = '%prog <mountpoint> inputfile ...]'
-    description = 'expose some existing files in a filesystem at mountpoint'
+    usage = '%prog <mountpoint> inputfile1 ...'
+    description = 'Expose existing files in a new filesystem at mountpoint.'
 
     optparser = OptionParser(description = description,
                              usage = usage)
     optparser.add_option('-v', '--verbose', action='store_true')
     
-    schemes = [ 'copy', 'flat', 'trim']
+    schemes = {'copy': FileReader,
+               'flat': FlatReader,
+               'common': CommonReader }
     optparser.add_option('-s', '--scheme', type='choice',
-                         choices=schemes, default=schemes[0],
-                         help='choices: ' + ', '.join(schemes) + '; default: %default')
+                         choices=schemes.keys(), default='copy',
+                         help='choices: '
+                         + ', '.join(schemes.keys())
+                         + '; default: %default')
+    optparser.add_option('-o', '--once', action='store_true',
+                         help='''only read input files once,
+                         rather than rereading them when they change''')
     optparser.add_option('', '--debug', action='store_true')
     (options, args) = optparser.parse_args()
 
@@ -286,16 +334,15 @@ if __name__ == '__main__':
     if options.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if len(args) < 2:
-        sys.stderr.write('usage: ' + usage.replace('%prog', argv[0]))
-        sys.stderr.write('\n')
-        exit(1)
+    if len(args) == 0:
+        optparser.error('no mount point or input files specified')
+    if len(args) == 1:
+        optparser.error('no input files specified')
 
     mountpoint = args.pop(0)
     logging.debug('Mounting to ' + mountpoint)
 
-    reader = {'copy': FileReader,
-              'flat': FlatReader,
-              'trim': TrimReader }[options.scheme](args)
+    reader = schemes[options.scheme](args)
 
-    fuse = FUSE(MapFuse(reader), mountpoint, foreground=True)
+    watch = [] if options.once else [i for i in args if i != '-']
+    fuse = FUSE(MapFuse(reader, watch), mountpoint, foreground=True)
