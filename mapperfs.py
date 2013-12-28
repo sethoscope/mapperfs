@@ -118,16 +118,17 @@ class MapFuse(LoggingMixIn, Operations):
 
     def __call__(self, op, path, *args):
         real_path = self._find_referent(path)
-        logging.debug('calling %s with %s %s' % (op, path, str(args)))
+        logging.debug('calling %s with %s (%s) %s' % (op, path, real_path, str(args)))
         return Operations.__call__(self, op, real_path, *args)
 
     def noaccess(self, *args):
         raise FuseOSError(EACCES)
 
     def access(self, path, mode):
+        '''Returns 0 if access is permitted, -1 otherwise.'''
         if isinstance(path, Directory):
-            return 1 if (mode & os.W_OK) else 0
-        return os.access(path, mode)
+            return -1 if (mode & os.W_OK) else 0
+        return 0 if os.access(path, mode) else -1
 
     def init(self, path):
         if self.watch_files:
