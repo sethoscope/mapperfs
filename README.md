@@ -7,12 +7,12 @@ It can be useful as-is if you have simple input files (I use it with GQView/Geeq
 ## path shortening
 
 There are three options for how file paths appear in your new
-filesystem.  Below are explanations and examples of each option.
+filesystem.  Below are explanations and examples of each method.
 
 
 ###copy - copy the whole path
 
-    % mapperfs.py --scheme copy /mnt /tmp/list-of-yam-files
+    % mapperfs.py --mapper copy /mnt /tmp/list-of-yam-files
     % find /mnt -type f
     /mnt/home/seth/lib/recipes/mashed-yams
     /mnt/home/seth/lib/stories/mashed-yams
@@ -20,7 +20,7 @@ filesystem.  Below are explanations and examples of each option.
 
 ###flat - put all files in one directory
 
-    % mapperfs.py --scheme flat /mnt /tmp/list-of-yam-files
+    % mapperfs.py --mapper flat /mnt /tmp/list-of-yam-files
     % find /mnt -type f
     /mnt/mashed-yams
     /mnt/mashed-yams-1
@@ -28,7 +28,7 @@ filesystem.  Below are explanations and examples of each option.
 
 ###common -  trim off whatever directories all files have in common
 
-    % mapperfs.py --scheme common /mnt /tmp/list-of-yam-files
+    % mapperfs.py --mapper common /mnt /tmp/list-of-yam-files
     % find /mnt -type f
     /mnt/recipes/mashed-yams
     /mnt/stories/mashed-yams

@@ -319,47 +319,46 @@ def main():
     # that changed.  But we don't do that, because it's complicated
     # and probably not useful to anyone.
 
-    from optparse import OptionParser
-
-    usage = '%prog <mountpoint> inputfile1 ...'
-    description = 'Expose existing files in a new filesystem at mountpoint.'
-
-    optparser = OptionParser(description = description,
-                             usage = usage)
-    optparser.add_option('-v', '--verbose', action='store_true')
-    
-    schemes = {'copy': TrivialMapper,
+    mappers = {'copy': TrivialMapper,
                'flat': FlatMapper,
                'common': CommonMapper }
-    optparser.add_option('-s', '--scheme', type='choice',
-                         choices=schemes.keys(), default='copy',
-                         help='choices: '
-                         + ', '.join(schemes.keys())
-                         + '; default: %default')
-    optparser.add_option('-o', '--once', action='store_true',
+
+    from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
+    description = 'Expose existing files in a new filesystem at mountpoint.'
+    parser = ArgumentParser(description=description,
+                            formatter_class=ArgumentDefaultsHelpFormatter)
+    parser.add_argument('-m', '--mapper', choices=mappers.keys(),
+                        default='copy',
+                        help='method of mapping filenames into the filesystem')
+    parser.add_argument('-o', '--once', action='store_true',
                          help='''only read input files once,
                          rather than rereading them when they change''')
-    optparser.add_option('', '--debug', action='store_true')
-    (options, args) = optparser.parse_args()
+    parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--debug', action='store_true')
+    parser.add_argument('mountpoint',
+                        help='directory at which to mount the new filesystem')
+    parser.add_argument('inputfile', nargs='+',
+                        help="""File listing files, one per line, that
+                        should exist in the new filesystem. - specifies
+                        stdin.  (You can list stdin more than once, but
+                        you probably don't want to.  You can list both
+                        stdin and regular files, but if you do, you
+                        should probably also use --once.)""")
 
-    if options.verbose:
+    args = parser.parse_args()
+
+    if args.verbose:
         logging.getLogger().setLevel(logging.INFO)
-    if options.debug:
+    if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
 
-    if len(args) == 0:
-        optparser.error('no mount point or input files specified')
-    if len(args) == 1:
-        optparser.error('no input files specified')
+    logging.debug('Mounting to ' + args.mountpoint)
 
-    mountpoint = args.pop(0)
-    logging.debug('Mounting to ' + mountpoint)
+    mapper = mappers[args.mapper]()
+    pair_source = lambda: mapper.pairs(read_files(args.inputfile))
 
-    mapper = schemes[options.scheme]()
-    pair_source = lambda: mapper.pairs(read_files(args))
-
-    watch = [] if options.once else [i for i in args if i != '-']
-    fuse = FUSE(MapFuse(pair_source, watch), mountpoint, foreground=True)
+    watch = [] if args.once else [i for i in args.inputfile if i != '-']
+    fuse = FUSE(MapFuse(pair_source, watch), args.mountpoint, foreground=True)
     
 if __name__ == '__main__':
     main()
